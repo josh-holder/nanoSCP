@@ -5,7 +5,7 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
-def rocket_dynamics(x,u, dt):
+def rocket_dynamics_old(x,u, dt):
     g = 9.81
     rotated_u = jnp.array([u[0]*jnp.cos(x[4])- u[1]*jnp.sin(x[4]), u[0]*jnp.sin(x[4]) + u[1]*jnp.cos(x[4])])
     new_x = jnp.array([
@@ -14,7 +14,19 @@ def rocket_dynamics(x,u, dt):
         x[2] + rotated_u[0]*dt,
         x[3] + (rotated_u[1] - g)*dt,
         x[4] + x[5]*dt,
-        x[5] + 0.1*u[0]*dt
+        x[5] + u[0]*dt
+    ])
+
+    return new_x
+
+def rocket_dynamics(x,u, dt):
+    g = 9.81
+    new_x = jnp.array([
+        x[0] + x[2]*dt,
+        x[1] + x[3]*dt,
+        x[2] + u[0]/x[4]*dt,
+        x[3] + (2*u[1]/x[4] - g)*dt,
+        x[4] - 1/100*jnp.linalg.norm(u)*dt,
     ])
 
     return new_x
@@ -44,16 +56,15 @@ def init_optimization(T, As, Bs, Cs, x0, xf, x_size, u_size):
     # x0 = cp.Parameter(4)
     # xf = cp.Parameter(4)
 
-    Q = jnp.array([[1,0,0,0,0,0],
-                     [0,1,0,0,0,0],
-                     [0,0,1,0,0,0],
-                     [0,0,0,1,0,0],
-                     [0,0,0,0,0,0],
-                     [0,0,0,0,0,0]])
+    Q = jnp.array([[1,0,0,0,0],
+                     [0,1,0,0,0],
+                     [0,0,1,0,0],
+                     [0,0,0,1,0],
+                     [0,0,0,0,0]])
     R = jnp.eye(u_size)
 
     #inequality constraints
-    max_control_input = 25
+    max_control_input = 20
 
     equality_constraints = []
     inequality_constraints = []
@@ -65,8 +76,7 @@ def init_optimization(T, As, Bs, Cs, x0, xf, x_size, u_size):
         inequality_constraints.append(cp.norm(u[i,:]) <= max_control_input)
 
         inequality_constraints.append(x[i,1] >= 0)
-        inequality_constraints.append(x[i,4] <= np.pi/3)
-        inequality_constraints.append(x[i,4] >= -np.pi/3)
+        inequality_constraints.append(x[i,4] >= 1)
         inequality_constraints.append(u[i,1] >= 0)
 
     equality_constraints.append(x[0,:] == x0)
@@ -74,7 +84,8 @@ def init_optimization(T, As, Bs, Cs, x0, xf, x_size, u_size):
 
     all_constraints = equality_constraints + inequality_constraints
 
-    state_cost_per_timestep = [(1/2)*cp.quad_form(x[i,:] - xf, Q) for i in range(1,T)]
+    # state_cost_per_timestep = [(1/2)*cp.quad_form(x[i,:] - xf, Q) for i in range(1,T)]
+    state_cost_per_timestep = [0]
 
     control_cost_per_timestep = [(1/2)*cp.quad_form(u[i,:], R) for i in range(T)]
 
@@ -98,6 +109,7 @@ def find_optimal_action(x0, xf, controls_guess, T, dt=0.1, tolerance=0.01, max_i
     x_size = x0.shape[0]
     u_size = controls_guess.shape[1]
 
+    print(controls_guess)
     x_traj_curr = propagate_controls(controls_guess, x0, dt)
     u_traj_curr = controls_guess
     
@@ -130,7 +142,7 @@ def find_optimal_action(x0, xf, controls_guess, T, dt=0.1, tolerance=0.01, max_i
 
         optimization_prob, opt_states, opt_controls = init_optimization(T, As, Bs, Cs, x0, xf, x_size, u_size)
 
-        optimization_prob.solve()
+        optimization_prob.solve(solver=cp.SCS)
 
         print(f"Optimization status: {optimization_prob.status}")
 
@@ -140,7 +152,7 @@ def find_optimal_action(x0, xf, controls_guess, T, dt=0.1, tolerance=0.01, max_i
         x_traj_curr = propagate_controls(opt_controls.value, x0, dt)
         u_traj_curr = opt_controls.value
 
-        if optimization_prob.value < best_value:
+        if optimization_prob.value + tolerance < best_value:
             best_value = optimization_prob.value
             iters_without_improvement = 0
 
@@ -154,10 +166,25 @@ def find_optimal_action(x0, xf, controls_guess, T, dt=0.1, tolerance=0.01, max_i
         iter += 1
     
     for i, xt in enumerate(x_traj_hist):
-        if i != len(x_traj_hist) - 1:
-            plt.plot(xt[:,0], xt[:,1],'k--', alpha=(i+1)/len(x_traj_hist))
-        else:
-            plt.plot(xt[:,0], xt[:,1], color='g')
+        # if i != len(x_traj_hist) - 1:
+        plt.plot(xt[:,0], xt[:,1],'k--', alpha=(i+1)/len(x_traj_hist))
+
+    for k in range(T):
+        print(np.linalg.norm(best_u_traj[k,:]))
+        if k % 5 == 0:
+            plt.quiver(best_x_traj[k,0], best_x_traj[k,1], -best_u_traj[k,0], -best_u_traj[k,1], color='g')
+            # plt.quiver(best_x_traj[k,0]-u[0], best_x_traj[k,1]-u[1], u[0], u[1], color='g')
+    
+    plt.plot([-15,5], [0,0], 'r', label='Ground constraint')
+    plt.quiver(-100, -100, 1, 1, color='g', label='Thrust vector')
+    plt.plot([-100,-101], [0,0], 'k--', label='Trajectories')
+    plt.scatter(xf[0], xf[1], color='b', marker='x', label='Landing Target')
+
+    plt.xlim(-15, 5)
+    plt.ylim(-5, 20)
+    plt.xlabel('x')
+    plt.ylabel('y')
+    plt.legend()
     plt.show()
 
     return best_x_traj, best_u_traj
@@ -220,12 +247,17 @@ def find_optimal_action(x0, xf, controls_guess, T, dt=0.1, tolerance=0.01, max_i
 #     return vehicle
 
 if __name__ == "__main__":
-    x0 = np.array([-10, 10, 2, -2, 0, 0])
-    xf = np.array([0, 0, 0, 0, 0, 0])
-    T = 250
-    controls_guess = 10*np.random.rand(T, 2)
+    x0 = np.array([-10, 10, -2, -2, 2])
+    xf = np.array([0, 0, 0, 0, 0])
+    T = 50
 
-    xs, us = find_optimal_action(x0, xf, controls_guess, T, dt=0.01, verbose=True, max_iwoi=10)
+    controls_guess = np.zeros((T, 2))
+    for k in range(T):
+        dir = (k%10) - 5
+
+        controls_guess[k,:] = np.array([dir, 12])
+
+    xs, us = find_optimal_action(x0, xf, controls_guess, T, dt=0.1, verbose=True, max_iwoi=5)
 
     # plt.plot(xs[:,0], xs[:,1])
     # # for i in range(T):
